@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WebRTC P2P Demo</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 600px; margin: 2rem auto; padding: 0 1rem; }
+  textarea { width: 100%; height: 5rem; box-sizing: border-box; }
+  #log { border: 1px solid #ccc; height: 12rem; overflow-y: auto; padding: .5rem; margin-bottom: .5rem; }
+  #msg-input { width: 75%; }
+  button { padding: .4rem .8rem; }
+</style>
+</head>
+<body>
+<h1>WebRTC P2P Demo</h1>
+<p id="status">Starting…</p>
+
+<!-- Initiator view: share the link, then paste the peer's answer -->
+<div id="offer-section" hidden>
+  <p>Send this link to your peer:</p>
+  <textarea id="offer-link" readonly></textarea>
+  <p>Then paste the answer they send back:</p>
+  <textarea id="answer-input" placeholder="Paste answer blob here"></textarea>
+  <button id="connect-btn">Connect</button>
+</div>
+
+<!-- Responder view: send this answer blob back to the initiator -->
+<div id="answer-section" hidden>
+  <p>Send this blob back to the person who invited you:</p>
+  <textarea id="answer-output" readonly></textarea>
+</div>
+
+<!-- Chat view: shown once the direct connection opens -->
+<div id="chat-section" hidden>
+  <div id="log"></div>
+  <input id="msg-input" placeholder="Type a message">
+  <button id="send-btn">Send</button>
+</div>
+
+<script>
+// Public STUN server: lets each peer discover its own public (NAT-mapped) address for hole punching.
+const config = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
+
+// Grab the elements we interact with.
+const status = document.getElementById("status");
+const offerSection = document.getElementById("offer-section");
+const answerSection = document.getElementById("answer-section");
+const chatSection = document.getElementById("chat-section");
+const log = document.getElementById("log");
+
+// The data channel we send chat over, set once it exists.
+let chatChannel;
+
+// One connection object for this page.
+const pc = new RTCPeerConnection(config);
+
+// Encode an SDP description into a URL-safe-enough string for copy-paste.
+const encode = (desc) => btoa(JSON.stringify(desc));
+
+// Decode a pasted string back into an SDP description.
+const decode = (str) => new RTCSessionDescription(JSON.parse(atob(str)));
+
+// Wait until ICE gathering finishes so the SDP contains every candidate (non-trickle signaling).
+function waitForIce() {
+  if (pc.iceGatheringState === "complete") return Promise.resolve();
+  return new Promise((resolve) => {
+    pc.addEventListener("icegatheringstatechange", () => {
+      if (pc.iceGatheringState === "complete") resolve();
+    });
+  });
+}
+
+// Wire up a data channel and reveal the chat UI when it opens.
+function setupChannel(channel) {
+  chatChannel = channel;
+  channel.onopen = () => { chatSection.hidden = false; };
+  channel.onmessage = (e) => addLine("Peer: " + e.data);
+}
+
+// Append a line to the chat log.
+function addLine(text) {
+  const line = document.createElement("div");
+  line.textContent = text;
+  log.appendChild(line);
+  log.scrollTop = log.scrollHeight;
+}
+
+// Show connection state transitions so the hole punch (or its failure) is visible.
+pc.onconnectionstatechange = () => { status.textContent = "Connection: " + pc.connectionState; };
+
+// The offer, if present, rides in the URL hash — this decides which peer we are.
+const remoteOffer = location.hash.slice(1);
+
+if (!remoteOffer) {
+  // Initiator: create the data channel, make an offer, and build a shareable link.
+  setupChannel(pc.createDataChannel("chat"));
+  offerSection.hidden = false;
+  (async () => {
+    await pc.setLocalDescription(await pc.createOffer());
+    await waitForIce();
+    // Bake the full offer into the link's hash so opening it starts the responder side.
+    document.getElementById("offer-link").value =
+      location.href.split("#")[0] + "#" + encode(pc.localDescription);
+  })();
+
+  // Finish the handshake when the initiator pastes the answer blob.
+  document.getElementById("connect-btn").onclick = async () => {
+    await pc.setRemoteDescription(decode(document.getElementById("answer-input").value.trim()));
+  };
+} else {
+  // Responder: the initiator creates the channel, so just listen for it.
+  pc.ondatachannel = (e) => setupChannel(e.channel);
+  answerSection.hidden = false;
+  (async () => {
+    await pc.setRemoteDescription(decode(remoteOffer));
+    await pc.setLocalDescription(await pc.createAnswer());
+    await waitForIce();
+    // Show the answer blob for the user to send back to the initiator.
+    document.getElementById("answer-output").value = encode(pc.localDescription);
+  })();
+}
+
+// Send a chat message over the direct peer-to-peer channel.
+document.getElementById("send-btn").onclick = () => {
+  const input = document.getElementById("msg-input");
+  if (!chatChannel || !input.value) return;
+  chatChannel.send(input.value);
+  addLine("You: " + input.value);
+  input.value = "";
+};
+</script>
+</body>
+</html>
